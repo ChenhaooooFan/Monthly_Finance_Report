@@ -158,7 +158,7 @@ def parse_bofa(data: bytes) -> pd.DataFrame:
     )
 
     DATE_LINE  = re.compile(r'^(\d{2}/\d{2})/\d{2}\s+(.+?)\s+(-?[\d,]+\.\d{2})\s*$')
-    CHECK_LINE = re.compile(r'^(\d{2}/\d{2})/\d{2}\s+(\d+)\s+([\d,]+\.\d{2})\s*$')
+    CHECK_LINE = re.compile(r'^(\d{2}/\d{2})/\d{2}\s+(\d+)\s+-?([\d,]+\.\d{2})\s*$')
 
     def skip(line):
         if not line: return True
