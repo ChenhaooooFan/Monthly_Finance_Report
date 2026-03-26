@@ -1,795 +1,705 @@
-import io
-import re
-import json
-from dataclasses import dataclass
-from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-import pandas as pd
-import streamlit as st
-
-# =========================
-# Config
-# =========================
-st.set_page_config(page_title="Bank Statement Expense Classifier", layout="wide")
-
-APP_DIR = Path(".")
-RULES_DIR = APP_DIR / "rules_data"
-RULES_DIR.mkdir(exist_ok=True)
-
-MERCHANT_RULES_FILE = RULES_DIR / "merchant_rules.csv"
-KEYWORD_RULES_FILE = RULES_DIR / "keyword_rules.csv"
-OVERRIDE_RULES_FILE = RULES_DIR / "manual_overrides.csv"
-
-CATEGORY_OPTIONS = [
-    "广告费（TK Ads）",
-    "物流成本",
-    "穿戴甲进货成本",
-    "配套耗材进货成本",
-    "停车补助费",
-    "午餐补助费",
-    "房租成本",
-    "行政费用",
-    "办公用品采购",
-    "办公软件会员费用",
-    "销售税预提（CA）",
-    "银行手续费",
-    "USPS 水单面单费用",
-    "员工工资",
-    "拍摄费用",
-    "主播工资",
-    "国内转账",
-    "Shopify 扣款",
-    "ADP TAX",
-    "律师费用",
-    "收入/回款",
-    "转账/内部往来",
-    "其他待确认",
-]
-
-DEFAULT_MERCHANT_RULES = [
-    ("TIKTOK ADS", "广告费（TK Ads）", 0.99, "merchant"),
-    ("ADS.TIKTOK", "广告费（TK Ads）", 0.99, "merchant"),
-    ("TIKTOK SHOP", "Shopify 扣款", 0.70, "merchant"),
-    ("SHOPIFY", "Shopify 扣款", 0.95, "merchant"),
-    ("ADP TAX", "ADP TAX", 0.99, "merchant"),
-    ("ADP WAGE PAY", "员工工资", 0.99, "merchant"),
-    ("ADP FEES", "办公软件会员费用", 0.90, "merchant"),
-    ("ADP PAY-BY-PAY", "办公软件会员费用", 0.90, "merchant"),
-    ("REGUS", "房租成本", 0.98, "merchant"),
-    ("HANKIN PATENT LAW", "律师费用", 0.99, "merchant"),
-    ("OPENAI", "办公软件会员费用", 0.98, "merchant"),
-    ("CHATGPT SUBSCR", "办公软件会员费用", 0.98, "merchant"),
-    ("INTUIT", "办公软件会员费用", 0.98, "merchant"),
-    ("QBOOKS", "办公软件会员费用", 0.98, "merchant"),
-    ("GOOGLE *WORKSP", "办公软件会员费用", 0.95, "merchant"),
-    ("GOOGLE WORKSPACE", "办公软件会员费用", 0.95, "merchant"),
-    ("USPS", "USPS 水单面单费用", 0.95, "merchant"),
-    ("PITNEY BOWES", "USPS 水单面单费用", 0.95, "merchant"),
-    ("MARS SHIPPING", "物流成本", 0.95, "merchant"),
-    ("SHANTOU PANJIA", "配套耗材进货成本", 0.80, "merchant"),
-    ("ALADDIN GLOBAL", "穿戴甲进货成本", 0.90, "merchant"),
-    ("H.K ALADDIN GLOBAL", "穿戴甲进货成本", 0.90, "merchant"),
-    ("DBS BANK", "穿戴甲进货成本", 0.75, "merchant"),
-    ("BANK OF AMERICA", "银行手续费", 0.80, "merchant"),
-]
-
-DEFAULT_KEYWORD_RULES = [
-    ("PAYROLL", "员工工资", 0.95, "keyword"),
-    ("LUNCH", "午餐补助费", 0.98, "keyword"),
-    ("PARKING", "停车补助费", 0.98, "keyword"),
-    ("INTERNALTRANSFER", "转账/内部往来", 0.98, "keyword"),
-    ("INTERNAL TRANSFER", "转账/内部往来", 0.98, "keyword"),
-    ("REFUND", "收入/回款", 0.70, "keyword"),
-    ("WIRE TYPE:FX OUT", "穿戴甲进货成本", 0.85, "keyword"),
-    ("EXTERNAL TRANSFER FEE", "银行手续费", 0.98, "keyword"),
-    ("SERVICE FEE", "银行手续费", 0.98, "keyword"),
-]
-
-LIKELY_AMBIGUOUS_KEYWORDS = [
-    "AMAZON", "SQ *", "UBER", "FANTUAN", "HUNGRYPANDA", "PHO", "MEAL", "RESTAURANT"
-]
-
-PDF_ENGINE_HELP = """
-推荐安装：
-pip install streamlit pandas pdfplumber openpyxl xlsxwriter pypdf
 """
+ColorFour LLC — 财务流水智能分类系统
+单文件版 | 支持 BofA / Chase PDF + Payoneer CSV
+"""
+import re
+import io
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-# =========================
-# Utility + persistence
-# =========================
-def ensure_rule_files() -> None:
-    if not MERCHANT_RULES_FILE.exists():
-        pd.DataFrame(DEFAULT_MERCHANT_RULES, columns=["pattern", "category", "confidence", "rule_type"]).to_csv(
-            MERCHANT_RULES_FILE, index=False
-        )
-    if not KEYWORD_RULES_FILE.exists():
-        pd.DataFrame(DEFAULT_KEYWORD_RULES, columns=["pattern", "category", "confidence", "rule_type"]).to_csv(
-            KEYWORD_RULES_FILE, index=False
-        )
-    if not OVERRIDE_RULES_FILE.exists():
-        pd.DataFrame(columns=["merchant_key", "category", "created_at"]).to_csv(OVERRIDE_RULES_FILE, index=False)
+# ══════════════════════════════════════════════════════════════
+#  RULES
+# ══════════════════════════════════════════════════════════════
+PAYONEER_RULES = {
+    "5133":"员工工资（派安盈）","9382":"员工工资（派安盈）","1510":"员工工资（派安盈）",
+    "0076":"员工工资（派安盈）","2000":"员工工资（派安盈）","0472":"员工工资（派安盈）",
+    "1591":"员工工资（派安盈）","7537":"员工工资（派安盈）","4745":"员工工资（派安盈）",
+    "0347":"员工工资（派安盈）","6721":"穿戴甲进货成本","4475":"穿戴甲进货成本",
+    "6667":"穿戴甲进货成本","5675":"穿戴甲进货成本","0528":"穿戴甲进货成本",
+    "9491":"穿戴甲进货成本","5318":"穿戴甲进货成本","9276":"穿戴甲进货成本",
+    "3284":"穿戴甲进货成本","4783":"穿戴甲进货成本","9231":"穿戴甲进货成本",
+    "8436":"穿戴甲进货成本","0227":"穿戴甲进货成本","3121":"穿戴甲进货成本",
+    "5755":"穿戴甲进货成本","9460":"穿戴甲进货成本","4785":"物流成本",
+    "0664":"物流成本","2292":"物流成本","2465":"配套耗材进货成本",
+    "8011":"配套耗材进货成本","9005":"配套耗材进货成本","8456":"配套耗材进货成本",
+    "6006":"拍摄费用","2689":"拍摄费用","9215":"拍摄费用","6872":"拍摄费用",
+    "1530":"办公软件会费","1001":"办公软件会费",
+}
+
+BANK_RULES = [
+    (r"Zelle.*JINGYI HUANG",                    "员工工资（现金）"),
+    (r"Zelle.*ZHENLI WANG",                     "国内转账"),
+    (r"Zelle.*(InternalTransfer|COLORFOUR LLC)", "Payoneer内部转账"),
+    (r"Zelle.*Lunch",                            "午餐补助费"),
+    (r"Zelle.*Parking",                          "停车补助费"),
+    (r"Zelle.*TINGTING LIN",                     "午餐补助费"),
+    (r"Zelle.*payroll",                          "主播工资"),
+    (r"Zelle payment to [A-Z][a-z]",             "主播工资"),
+    (r"PURCHASE REFUND.*TIKTOK",                 "销售退款冲销"),
+    (r"TIKTOK ADS|TIKTOK\.COM CA",               "广告费 (TK Ads)"),
+    (r"TikTok Inc.*PAYMENT|TikTok Shop.*DES:",   "TikTok净销售额"),
+    (r"SHOPIFY\*",                               "Shopify扣款"),
+    (r"ADP WAGE PAY",                            "员工工资"),
+    (r"ADP Tax",                                 "APD TAX"),
+    (r"ADP PAY-BY-PAY",                          "办公软件会费"),
+    (r"ADP PAYROLL FEES",                        "行政费用"),
+    (r"Regus Management",                        "房租成本"),
+    (r"H\.K ALADDIN",                            "穿戴甲进货成本"),
+    (r"Shantou Panjia",                          "配套耗材进货成本"),
+    (r"Mars Shipping",                           "物流成本"),
+    (r"HANKIN PATENT LAW",                       "律师费用"),
+    (r"OPENAI|KLAVIYO|GOOGLE.*Worksp|INTUIT.*QBooks|TIGER-ROAR|imyfone", "办公软件会费"),
+    (r"TRACK1099",                               "行政费用"),
+    (r"AMAZON MKTPL|AMAZON RETA",                "办公用品采购"),
+    (r"FANTUAN|HUNGRYPANDA|UBER.*EATS|SQ.*DOWNTOWN LA PHO|RUSSELL.*CONVENIENCE|SLICES.*LOS ANGELES", "午餐补助费"),
+    (r"TRANSFER.*ColorFour LLC Confirmation|TRANSFER COLORFOUR LLC:ColorFour", "Payoneer内部转账"),
+    (r"External transfer fee|Monthly Service Fee", "银行手续费"),
+    (r"Check #1[0-9]+",                          "停车补助费"),
+    (r"PAYPAL.*INST XFER",                       "其他支出"),
+    (r"Tst\* Salata|Sq \*Hinodeya|Uep\*Lao|Full House|99 Ranch|Home Depot|Slices|Tst\* Togo|King Charcoal|Super King|Gelson|H Mart|Daiso|168 Market|Hanshin|Ralphs|LA Tofu|Groupon|Classpass|Lao MA Tou|Samyi Cake|Tianlu Investment|Angel.*Tacos|Song Yu|Xiaoqing Huang|M&D Snacks", "股东个人消费"),
+]
+
+ALL_CATS = [
+    "广告费 (TK Ads)","穿戴甲进货成本","配套耗材进货成本","物流成本",
+    "员工工资","员工工资（派安盈）","员工工资（现金）","主播工资",
+    "拍摄费用","房租成本","办公软件会费","办公用品采购","行政费用",
+    "银行手续费","APD TAX","Shopify扣款","停车补助费","午餐补助费",
+    "国内转账","销售税预提(CA)","律师费用","TikTok净销售额","Shopify净销售额",
+    "销售退款冲销","Payoneer内部转账","股东个人消费","其他支出","待确认",
+]
+
+EXCLUDE_PL = {"Payoneer内部转账", "销售退款冲销", "股东个人消费"}
+
+EXPENSE_ORDER = [
+    ("广告费（TK Ads）",      ["广告费 (TK Ads)"]),
+    ("物流成本",              ["物流成本"]),
+    ("穿戴甲进货成本",         ["穿戴甲进货成本"]),
+    ("配套耗材进货成本",       ["配套耗材进货成本"]),
+    ("停车补助费",            ["停车补助费"]),
+    ("午餐补助费",            ["午餐补助费"]),
+    ("房租成本",              ["房租成本"]),
+    ("行政费用",              ["行政费用"]),
+    ("办公用品采购",           ["办公用品采购"]),
+    ("办公软件会员费用",       ["办公软件会费"]),
+    ("银行手续费用",           ["银行手续费"]),
+    ("员工工资（Zelle/现金）", ["员工工资","员工工资（现金）"]),
+    ("拍摄费用",              ["拍摄费用"]),
+    ("主播工资",              ["主播工资"]),
+    ("国内转账",              ["国内转账"]),
+    ("Shopify 扣款",          ["Shopify扣款"]),
+    ("员工工资（派安盈）",     ["员工工资（派安盈）"]),
+    ("APD TAX",               ["APD TAX"]),
+    ("律师费用",              ["律师费用"]),
+    ("销售税预提（CA）",       ["销售税预提(CA)"]),
+    ("其他支出",              ["其他支出"]),
+]
 
 
-def load_rules() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    ensure_rule_files()
-    merchant_df = pd.read_csv(MERCHANT_RULES_FILE)
-    keyword_df = pd.read_csv(KEYWORD_RULES_FILE)
-    override_df = pd.read_csv(OVERRIDE_RULES_FILE)
-    return merchant_df, keyword_df, override_df
+def cls_bank(desc):
+    for pat, cat in BANK_RULES:
+        if re.search(pat, desc, re.IGNORECASE):
+            return cat
+    return "待确认"
 
 
-def save_override_rule(merchant_key: str, category: str) -> None:
-    _, _, override_df = load_rules()
-    merchant_key = normalize_text(merchant_key)
-    override_df = override_df[override_df["merchant_key"].astype(str) != merchant_key]
-    new_row = pd.DataFrame(
-        [{"merchant_key": merchant_key, "category": category, "created_at": datetime.now().isoformat(timespec="seconds")}]
-    )
-    override_df = pd.concat([override_df, new_row], ignore_index=True)
-    override_df.to_csv(OVERRIDE_RULES_FILE, index=False)
+def cls_pay(desc):
+    if re.search(r"Payment from COLORFOUR LLC", desc, re.IGNORECASE):
+        return "Payoneer内部转账"
+    if re.search(r"1688\.com", desc, re.IGNORECASE):
+        return "办公用品采购"
+    m = re.search(r"\((\d{4})\)", desc)
+    if m and m.group(1) in PAYONEER_RULES:
+        return PAYONEER_RULES[m.group(1)]
+    return "待确认"
 
 
-def save_new_pattern_rule(pattern: str, category: str, rule_bucket: str = "merchant", confidence: float = 0.95) -> None:
-    pattern = normalize_text(pattern)
-    if rule_bucket == "merchant":
-        df = pd.read_csv(MERCHANT_RULES_FILE)
-        if not ((df["pattern"].astype(str) == pattern) & (df["category"].astype(str) == category)).any():
-            df = pd.concat(
-                [df, pd.DataFrame([{"pattern": pattern, "category": category, "confidence": confidence, "rule_type": "merchant"}])],
-                ignore_index=True,
-            )
-            df.to_csv(MERCHANT_RULES_FILE, index=False)
-    else:
-        df = pd.read_csv(KEYWORD_RULES_FILE)
-        if not ((df["pattern"].astype(str) == pattern) & (df["category"].astype(str) == category)).any():
-            df = pd.concat(
-                [df, pd.DataFrame([{"pattern": pattern, "category": category, "confidence": confidence, "rule_type": "keyword"}])],
-                ignore_index=True,
-            )
-            df.to_csv(KEYWORD_RULES_FILE, index=False)
-
-
-def normalize_text(text: str) -> str:
-    text = str(text or "")
-    text = text.replace("’", "'").replace("“", '"').replace("”", '"')
-    text = text.upper().strip()
-    text = re.sub(r"\s+", " ", text)
-    return text
-
-
-def safe_float(x) -> float:
+# ══════════════════════════════════════════════════════════════
+#  PARSERS
+# ══════════════════════════════════════════════════════════════
+def parse_amount(s):
     try:
-        return float(str(x).replace(",", "").replace("$", "").strip())
+        return float(str(s).replace(",", "").replace("$", "").strip())
     except Exception:
         return 0.0
 
 
-def amount_to_display(x: float) -> str:
-    return f"${x:,.2f}"
+def detect_bank(text):
+    if "Bank of America" in text or "bankofamerica" in text.lower():
+        return "BofA"
+    if "Chase" in text or "JPMorgan" in text:
+        return "Chase"
+    return "BofA"
 
 
-def to_excel_bytes(detail_df: pd.DataFrame, summary_df: pd.DataFrame, unknown_df: pd.DataFrame) -> bytes:
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        detail_df.to_excel(writer, index=False, sheet_name="交易明细")
-        summary_df.to_excel(writer, index=False, sheet_name="分类汇总")
-        unknown_df.to_excel(writer, index=False, sheet_name="待确认交易")
-    output.seek(0)
-    return output.getvalue()
-
-
-# =========================
-# PDF / CSV parsing
-# =========================
-def parse_uploaded_file(uploaded_file) -> pd.DataFrame:
-    suffix = Path(uploaded_file.name).suffix.lower()
-
-    if suffix == ".csv":
-        return parse_csv(uploaded_file)
-    if suffix in [".xlsx", ".xls"]:
-        return parse_excel(uploaded_file)
-    if suffix == ".pdf":
-        return parse_pdf_statement(uploaded_file)
-
-    raise ValueError("暂不支持该文件类型，请上传 PDF / CSV / Excel。")
-
-
-def parse_csv(uploaded_file) -> pd.DataFrame:
-    df = pd.read_csv(uploaded_file)
-    return standardize_transaction_df(df)
-
-
-def parse_excel(uploaded_file) -> pd.DataFrame:
-    xls = pd.ExcelFile(uploaded_file)
-    df = pd.read_excel(xls, xls.sheet_names[0])
-    return standardize_transaction_df(df)
-
-
-def standardize_transaction_df(df: pd.DataFrame) -> pd.DataFrame:
-    raw_cols = {c.lower().strip(): c for c in df.columns}
-    date_col = next((raw_cols[c] for c in raw_cols if "date" in c), None)
-    desc_col = next((raw_cols[c] for c in raw_cols if any(k in c for k in ["description", "memo", "details", "merchant", "name"])), None)
-    amount_col = next((raw_cols[c] for c in raw_cols if "amount" in c), None)
-
-    if not all([date_col, desc_col, amount_col]):
-        raise ValueError("CSV / Excel 未识别到 date / description / amount 列，请检查表头。")
-
-    result = pd.DataFrame({
-        "date": pd.to_datetime(df[date_col], errors="coerce"),
-        "description": df[desc_col].astype(str),
-        "amount": pd.to_numeric(df[amount_col], errors="coerce"),
-    })
-
-    result = result.dropna(subset=["date", "description", "amount"]).copy()
-    result["raw_description"] = result["description"]
-    result["direction"] = result["amount"].apply(lambda x: "debit" if x < 0 else "credit")
-    result["amount_abs"] = result["amount"].abs()
-    return result.reset_index(drop=True)
-
-
-def parse_pdf_statement(uploaded_file) -> pd.DataFrame:
-    text = extract_pdf_text(uploaded_file)
-    txns = extract_boa_transactions_from_text(text)
-    if not txns:
-        raise ValueError("未能从 PDF 中识别出交易明细。请先试 CSV，或检查 statement 格式。")
-
-    df = pd.DataFrame(txns)
-    df["date"] = pd.to_datetime(df["date"], format="%m/%d/%y", errors="coerce")
-    df["amount"] = df["amount"].apply(safe_float)
-    df["direction"] = df["amount"].apply(lambda x: "debit" if x < 0 else "credit")
-    df["amount_abs"] = df["amount"].abs()
-    df["raw_description"] = df["description"]
-    return df.dropna(subset=["date", "description", "amount"]).reset_index(drop=True)
-
-
-def extract_pdf_text(uploaded_file) -> str:
-    file_bytes = uploaded_file.read()
-    uploaded_file.seek(0)
-
-    errors = []
-    text = ""
-
+def parse_bofa(data: bytes) -> pd.DataFrame:
     try:
         import pdfplumber
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            parts = []
-            for page in pdf.pages:
-                t = page.extract_text() or ""
-                parts.append(t)
-            text = "\n".join(parts)
-    except Exception as e:
-        errors.append(f"pdfplumber: {e}")
+    except ImportError:
+        st.error("缺少依赖: pip install pdfplumber")
+        return pd.DataFrame()
 
-    if not text.strip():
-        try:
-            from pypdf import PdfReader
-            reader = PdfReader(io.BytesIO(file_bytes))
-            parts = []
-            for page in reader.pages:
-                parts.append(page.extract_text() or "")
-            text = "\n".join(parts)
-        except Exception as e:
-            errors.append(f"pypdf: {e}")
+    rows = []
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        text = "\n".join(p.extract_text() or "" for p in pdf.pages)
 
-    if not text.strip():
-        raise ValueError("PDF 解析失败。请安装 pdfplumber / pypdf，或改传 CSV。\n" + "\n".join(errors))
+    lines = text.split("\n")
+    section = None
 
-    return text
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if "Deposits and other credits" in line and "Total" not in line:
+            section = "dep"
+        elif "Withdrawals and other debits" in line and "Total" not in line:
+            section = "wdl"
+        elif line.startswith("Checks") and "Total" not in line:
+            section = "chk"
+        elif "Service fees" in line:
+            section = "fee"
+        elif any(x in line for x in ["Daily ledger", "Check images", "This page"]):
+            section = None
 
+        if section in ("dep", "wdl", "chk", "fee") and re.match(r"^\d{2}/\d{2}/\d{2}", line):
+            parts = [line]
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j].strip()
+                if not nxt or re.match(r"^\d{2}/\d{2}/\d{2}", nxt) or nxt.startswith("Total") or nxt.startswith("Card account"):
+                    break
+                if re.match(r"^-?[\d,]+\.\d{2}$", nxt):
+                    break
+                parts.append(nxt)
+                j += 1
+            full = " ".join(parts)
 
-def extract_boa_transactions_from_text(text: str) -> List[Dict]:
-    """
-    面向 Bank of America statement 的简单解析器：
-    1. 识别以 mm/dd/yy 开头的行
-    2. 允许 description 跨行，直到遇到金额
-    3. 金额形如 -1,234.56 或 1,234.56
-    """
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    transactions = []
-
-    txn_start = re.compile(r"^(?P<date>\d{2}/\d{2}/\d{2})\s+(?P<rest>.+)$")
-    amount_end = re.compile(r"(?P<amount>-?\d[\d,]*\.\d{2})$")
-
-    in_transaction_sections = False
-    current = None
-
-    section_markers = [
-        "Deposits and other credits",
-        "Withdrawals and other debits",
-        "Service fees",
-        "Checks",
-        "Card account #",
-        "Date Description Amount",
-        "Date Transaction description Amount",
-    ]
-
-    section_stop_markers = [
-        "Daily ledger balances",
-        "Check images",
-        "This page intentionally left blank",
-        "Total service fees",
-        "Subtotal for card account",
-        "Total checks",
-        "Page ",
-    ]
-
-    for line in lines:
-        if any(marker in line for marker in section_markers):
-            in_transaction_sections = True
-
-        if any(marker in line for marker in section_stop_markers):
-            if current is not None and current.get("description"):
-                maybe = finalize_txn(current)
-                if maybe:
-                    transactions.append(maybe)
-                current = None
-
-        if not in_transaction_sections:
-            continue
-
-        start_match = txn_start.match(line)
-        if start_match:
-            if current is not None:
-                maybe = finalize_txn(current)
-                if maybe:
-                    transactions.append(maybe)
-
-            current = {
-                "date": start_match.group("date"),
-                "description_lines": [start_match.group("rest")],
-            }
-            continue
-
-        if current is not None:
-            current["description_lines"].append(line)
-
-    if current is not None:
-        maybe = finalize_txn(current)
-        if maybe:
-            transactions.append(maybe)
-
-    return transactions
-
-
-def finalize_txn(current: Dict) -> Optional[Dict]:
-    merged = " ".join(current["description_lines"]).strip()
-    merged = re.sub(r"\s+", " ", merged)
-
-    amount_match = re.search(r"(-?\d[\d,]*\.\d{2})$", merged)
-    if not amount_match:
-        return None
-
-    amount_str = amount_match.group(1)
-    desc = merged[:amount_match.start()].strip()
-
-    if not desc:
-        return None
-
-    # 过滤 page / subtotal / total 行
-    bad_prefixes = [
-        "TOTAL ",
-        "SUBTOTAL ",
-        "PAGE ",
-        "DATE DESCRIPTION AMOUNT",
-        "DATE TRANSACTION DESCRIPTION AMOUNT",
-        "DATE CHECK # AMOUNT",
-    ]
-    if any(desc.upper().startswith(x) for x in bad_prefixes):
-        return None
-
-    return {
-        "date": current["date"],
-        "description": desc,
-        "amount": safe_float(amount_str),
-    }
-
-
-# =========================
-# Classification
-# =========================
-def extract_merchant_key(description: str) -> str:
-    desc = normalize_text(description)
-
-    replacements = [
-        r"CONF#\s*[A-Z0-9]+",
-        r"CONFIRMATION#\s*\d+",
-        r"ID:\s*[A-Z0-9]+",
-        r"CO ID:\s*[A-Z0-9]+",
-        r"INDN:\s*[A-Z0-9X ]+",
-        r"TRN:\d+",
-        r"FX:[A-Z]{3}\s*[\d\.]+",
-        r"DATE:\d+",
-        r"TIME:\d+ ET",
-        r"\b\d{2}/\d{2}/\d{2}\b",
-        r"\b\d{4,}\b",
-        r"\bX{4,}\b",
-        r"PMT INFO:.*",
-        r'"[^"]+"',
-    ]
-
-    for pattern in replacements:
-        desc = re.sub(pattern, "", desc)
-
-    desc = re.sub(r"\bPURCHASE\b", "", desc)
-    desc = re.sub(r"\bMOBILE PURCHASE\b", "", desc)
-    desc = re.sub(r"\bTRANSFER\b", "", desc)
-    desc = re.sub(r"\bZELLE PAYMENT TO\b", "", desc)
-    desc = re.sub(r"\bZELLE PAYMENT\b", "", desc)
-    desc = re.sub(r"\bDES:\b", "", desc)
-    desc = re.sub(r"\bCCD\b", "", desc)
-    desc = re.sub(r"\bCKCD\b", "", desc)
-    desc = re.sub(r"\s+", " ", desc).strip()
-
-    tokens = desc.split()
-    if len(tokens) > 8:
-        desc = " ".join(tokens[:8])
-
-    return desc
-
-
-def classify_transactions(df: pd.DataFrame) -> pd.DataFrame:
-    merchant_rules, keyword_rules, override_rules = load_rules()
-
-    override_map = {
-        normalize_text(str(row["merchant_key"])): row["category"]
-        for _, row in override_rules.iterrows()
-    }
-
-    results = []
-    for _, row in df.iterrows():
-        description = str(row["description"])
-        desc_norm = normalize_text(description)
-        merchant_key = extract_merchant_key(description)
-        amount = float(row["amount"])
-
-        category = "其他待确认"
-        confidence = 0.0
-        rule_source = "unmatched"
-        needs_review = True
-        note = ""
-
-        # 0) override rule
-        if merchant_key in override_map:
-            category = override_map[merchant_key]
-            confidence = 1.0
-            rule_source = "manual_override"
-            needs_review = False
-
-        # 1) credit heuristics
-        elif amount > 0:
-            if "TIKTOK INC" in desc_norm or "PAYMENT" in desc_norm or "REFUND" in desc_norm:
-                category = "收入/回款"
-                confidence = 0.95
-                rule_source = "credit_heuristic"
-                needs_review = False
+            if section == "chk":
+                m = re.match(r"(\d{2}/\d{2})/\d{2}\s+(\d+)\s+-?([\d,]+\.\d{2})", full)
+                if m:
+                    rows.append({"date": m.group(1), "desc": f"Check #{m.group(2)}",
+                                 "amount": -parse_amount(m.group(3)), "src": "BofA"})
             else:
-                category = "收入/回款"
-                confidence = 0.60
-                rule_source = "generic_credit"
-                needs_review = True
+                m = re.match(r"(\d{2}/\d{2})/\d{2}\s+(.*?)\s+([\d,]+\.\d{2})\s*$", full)
+                if m:
+                    date, desc, amt_s = m.group(1), m.group(2).strip(), m.group(3)
+                    amount = parse_amount(amt_s)
+                    if section == "wdl" or section == "fee":
+                        amount = -amount
+                    rows.append({"date": date, "desc": desc, "amount": amount, "src": "BofA"})
+        i += 1
 
-        # 2) merchant rules
-        if rule_source == "unmatched":
-            for _, rule in merchant_rules.iterrows():
-                pattern = normalize_text(rule["pattern"])
-                if pattern and pattern in desc_norm:
-                    category = rule["category"]
-                    confidence = float(rule["confidence"])
-                    rule_source = "merchant_rule"
-                    needs_review = confidence < 0.90
-                    break
-
-        # 3) keyword rules
-        if rule_source == "unmatched":
-            for _, rule in keyword_rules.iterrows():
-                pattern = normalize_text(rule["pattern"])
-                if pattern and pattern in desc_norm:
-                    category = rule["category"]
-                    confidence = float(rule["confidence"])
-                    rule_source = "keyword_rule"
-                    needs_review = confidence < 0.90
-                    break
-
-        # 4) special heuristics
-        if rule_source == "unmatched":
-            if "WIRE TYPE:FX OUT" in desc_norm and ("ALADDIN" in desc_norm or "DBS BANK" in desc_norm):
-                category = "穿戴甲进货成本"
-                confidence = 0.92
-                rule_source = "wire_supplier_heuristic"
-                needs_review = False
-            elif "EXTERNAL TRANSFER FEE" in desc_norm:
-                category = "银行手续费"
-                confidence = 0.99
-                rule_source = "fee_heuristic"
-                needs_review = False
-            elif "ZELLE" in desc_norm and "PAYROLL" in desc_norm:
-                category = "员工工资"
-                confidence = 0.96
-                rule_source = "zelle_payroll_heuristic"
-                needs_review = False
-            elif any(k in desc_norm for k in LIKELY_AMBIGUOUS_KEYWORDS):
-                category = "其他待确认"
-                confidence = 0.30
-                rule_source = "ambiguous_spend"
-                needs_review = True
-                note = "疑似餐饮 / Amazon / 杂费，建议人工确认。"
-            elif amount < 0:
-                category = "其他待确认"
-                confidence = 0.20
-                rule_source = "generic_debit"
-                needs_review = True
-
-        results.append(
-            {
-                **row.to_dict(),
-                "merchant_key": merchant_key,
-                "auto_category": category,
-                "final_category": category,
-                "confidence": round(confidence, 2),
-                "rule_source": rule_source,
-                "needs_review": needs_review,
-                "note": note,
-            }
-        )
-
-    out = pd.DataFrame(results)
-    out["month"] = out["date"].dt.to_period("M").astype(str)
-    return out
-
-
-def build_summary(df: pd.DataFrame) -> pd.DataFrame:
-    debit_df = df[df["amount"] < 0].copy()
-    if debit_df.empty:
-        return pd.DataFrame(columns=["序号", "支出项目名称", "金额", "备注说明"])
-
-    summary = (
-        debit_df.groupby("final_category", dropna=False)["amount_abs"]
-        .sum()
-        .reset_index()
-        .rename(columns={"final_category": "支出项目名称", "amount_abs": "金额"})
-        .sort_values("金额", ascending=False)
-        .reset_index(drop=True)
-    )
-    summary["金额"] = summary["金额"].round(2)
-    summary.insert(0, "序号", range(1, len(summary) + 1))
-    summary["备注说明"] = ""
-    return summary[["序号", "支出项目名称", "金额", "备注说明"]]
-
-
-def mark_categories_from_editor(base_df: pd.DataFrame, edited_df: pd.DataFrame) -> pd.DataFrame:
-    df = base_df.copy()
-    if edited_df is None or edited_df.empty:
-        return df
-
-    if "row_id" not in df.columns or "row_id" not in edited_df.columns:
-        return df
-
-    edit_map = edited_df.set_index("row_id")["final_category"].to_dict()
-    df["final_category"] = df["row_id"].map(edit_map).fillna(df["final_category"])
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).drop_duplicates(subset=["date", "desc", "amount"])
+    df["cat"]    = df["desc"].apply(cls_bank)
+    df["status"] = df["cat"].apply(lambda c: "auto" if c != "待确认" else "pending")
     return df
 
 
-# =========================
-# UI
-# =========================
-def init_session():
-    for key in ["transactions_df", "classified_df", "edited_df"]:
-        if key not in st.session_state:
-            st.session_state[key] = None
-
-
-def sidebar_rule_manager():
-    st.sidebar.header("规则库管理")
-    merchant_rules, keyword_rules, override_rules = load_rules()
-
-    with st.sidebar.expander("查看商户规则", expanded=False):
-        st.dataframe(merchant_rules, use_container_width=True)
-
-    with st.sidebar.expander("查看关键词规则", expanded=False):
-        st.dataframe(keyword_rules, use_container_width=True)
-
-    with st.sidebar.expander("查看人工覆盖规则", expanded=False):
-        st.dataframe(override_rules, use_container_width=True)
-
-    with st.sidebar.expander("新增规则", expanded=False):
-        rule_type = st.selectbox("规则类型", ["merchant", "keyword"], key="new_rule_type")
-        pattern = st.text_input("匹配文本 / 关键词", key="new_rule_pattern")
-        category = st.selectbox("分类", CATEGORY_OPTIONS, key="new_rule_category")
-        confidence = st.slider("置信度", 0.5, 1.0, 0.95, 0.01, key="new_rule_conf")
-        if st.button("保存新规则"):
-            if pattern.strip():
-                save_new_pattern_rule(pattern, category, rule_bucket=rule_type, confidence=float(confidence))
-                st.success("规则已保存，刷新后生效。")
-            else:
-                st.warning("请先填写匹配文本。")
-
-
-def render_top_intro():
-    st.title("银行 Statement 分类汇总助手")
-    st.caption("上传 PDF / CSV / Excel → 自动分类 → 只确认少量不确定项 → 导出汇总表")
-
-    with st.expander("适合你的工作流", expanded=False):
-        st.markdown(
-            """
-1. 上传银行 statement  
-2. 程序自动解析交易  
-3. 根据规则库自动分类  
-4. 你只需要改“待确认”项目  
-5. 导出 Excel 汇总表，直接做月度费用明细
-            """
-        )
-
-
-def main():
-    init_session()
-    sidebar_rule_manager()
-    render_top_intro()
-
-    upload = st.file_uploader("上传银行 statement", type=["pdf", "csv", "xlsx", "xls"])
-
-    col_a, col_b = st.columns([2, 1])
-    with col_a:
-        review_threshold = st.slider("低于该置信度自动标记为“待确认”", 0.50, 1.00, 0.90, 0.01)
-    with col_b:
-        only_debits = st.checkbox("仅展示支出", value=True)
-
-    if upload is None:
-        st.info("先上传文件。PDF 推荐 BoA / Chase / AMEX 的标准 statement；CSV/Excel 更稳。")
-        st.code(PDF_ENGINE_HELP)
-        st.stop()
-
+def parse_chase(data: bytes) -> pd.DataFrame:
     try:
-        raw_df = parse_uploaded_file(upload)
-        raw_df = raw_df.sort_values(["date", "amount"], ascending=[True, True]).reset_index(drop=True)
-        raw_df["row_id"] = range(1, len(raw_df) + 1)
-        st.session_state["transactions_df"] = raw_df
-    except Exception as e:
-        st.error(f"文件解析失败：{e}")
-        st.stop()
+        import pdfplumber
+    except ImportError:
+        st.error("缺少依赖: pip install pdfplumber")
+        return pd.DataFrame()
 
-    classified_df = classify_transactions(st.session_state["transactions_df"])
-    classified_df["needs_review"] = (classified_df["confidence"] < review_threshold) | (classified_df["final_category"] == "其他待确认")
-    st.session_state["classified_df"] = classified_df.copy()
+    rows = []
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        text = "\n".join(p.extract_text() or "" for p in pdf.pages)
 
-    working_df = classified_df.copy()
-    if only_debits:
-        working_df = working_df[working_df["amount"] < 0].copy()
+    section = None
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        lu = line.upper()
+        if "DEPOSITS AND ADDITIONS" in lu:
+            section = "dep"
+            continue
+        if "ATM & DEBIT CARD WITHDRAWALS" in lu and "SUMMARY" not in lu:
+            section = "wdl"
+            continue
+        if "ELECTRONIC WITHDRAWALS" in lu:
+            section = "ewdl"
+            continue
+        if lu.startswith("FEES"):
+            section = "fee"
+            continue
+        if "DAILY ENDING BALANCE" in lu or "ATM & DEBIT CARD SUMMARY" in lu:
+            section = None
+            continue
 
-    st.subheader("1）交易明细")
-    show_cols = [
-        "row_id", "date", "description", "amount", "merchant_key",
-        "auto_category", "final_category", "confidence", "rule_source", "needs_review", "note"
-    ]
-    st.dataframe(
-        working_df[show_cols].sort_values(["date", "row_id"]),
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "date": st.column_config.DateColumn("日期"),
-            "amount": st.column_config.NumberColumn("金额", format="$%.2f"),
-            "confidence": st.column_config.NumberColumn("置信度", format="%.2f"),
-            "needs_review": st.column_config.CheckboxColumn("待确认"),
-        },
-    )
+        if section in ("dep", "wdl", "ewdl", "fee"):
+            m = re.match(r"^(\d{2}/\d{2})\s+(.+?)\s+\$?([\d,]+\.\d{2})$", line)
+            if not m:
+                m = re.match(r"^(\d{2}/\d{2})\s+(.+?)\s+([\d,]+\.\d{2})$", line)
+            if m:
+                desc = m.group(2).strip()
+                if any(x in desc for x in ["Total", "Beginning Balance", "Ending Balance"]):
+                    continue
+                amt = parse_amount(m.group(3))
+                amount = amt if section == "dep" else -amt
+                rows.append({"date": m.group(1), "desc": desc, "amount": amount, "src": "Chase"})
 
-    st.subheader("2）待确认交易")
-    unknown_df = working_df[working_df["needs_review"]].copy()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).drop_duplicates(subset=["date", "desc", "amount"])
+    df["cat"]    = df["desc"].apply(cls_bank)
+    df["status"] = df["cat"].apply(lambda c: "auto" if c != "待确认" else "pending")
+    return df
 
-    if unknown_df.empty:
-        st.success("本次没有待确认项目。")
-        edited_unknown_df = unknown_df.copy()
+
+def parse_payoneer(data: bytes) -> pd.DataFrame:
+    import datetime
+    try:
+        df_raw = pd.read_csv(io.BytesIO(data), encoding="utf-8-sig")
+    except Exception:
+        df_raw = pd.read_csv(io.BytesIO(data), encoding="gbk")
+    df_raw.columns = [c.strip() for c in df_raw.columns]
+    date_col = next((c for c in df_raw.columns if "date" in c.lower()), None)
+    desc_col = next((c for c in df_raw.columns if "desc" in c.lower()), None)
+    amt_col  = next((c for c in df_raw.columns if "amount" in c.lower()), None)
+    if not all([date_col, desc_col, amt_col]):
+        return pd.DataFrame()
+    rows = []
+    for _, row in df_raw.iterrows():
+        try:
+            amount = float(str(row[amt_col]).replace(",","").replace("$","").strip())
+        except Exception:
+            continue
+        date_s = str(row[date_col]).strip()
+        for fmt in ["%d %b, %Y","%Y-%m-%d","%m/%d/%Y","%d/%m/%Y"]:
+            try:
+                date_s = datetime.datetime.strptime(date_s, fmt).strftime("%m/%d")
+                break
+            except Exception:
+                pass
+        desc = str(row[desc_col]).strip()
+        cat  = cls_pay(desc)
+        rows.append({"date": date_s, "desc": desc, "amount": amount,
+                     "cat": cat, "src": "Payoneer",
+                     "status": "auto" if cat != "待确认" else "pending"})
+    return pd.DataFrame(rows)
+
+
+def parse_bank_pdf(data: bytes):
+    try:
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            first = pdf.pages[0].extract_text() or ""
+    except Exception:
+        first = ""
+    bank = detect_bank(first)
+    if bank == "Chase":
+        return parse_chase(data), "Chase"
+    return parse_bofa(data), "BofA"
+
+
+# ══════════════════════════════════════════════════════════════
+#  SUMMARY & EXPORT
+# ══════════════════════════════════════════════════════════════
+def build_summary(df, shopify=0.0):
+    totals = {}
+    for _, r in df.iterrows():
+        totals[r["cat"]] = totals.get(r["cat"], 0.0) + r["amount"]
+    tk  = totals.get("TikTok净销售额", 0.0)
+    inc = tk + shopify
+    exp = sum(v for k, v in totals.items() if v < 0 and k not in EXCLUDE_PL)
+    net = inc + exp
+    return {"totals": totals, "tk": tk, "shopify": shopify,
+            "income": inc, "expense": exp, "net": net,
+            "margin": round(net/inc*100,1) if inc else 0}
+
+
+def export_csv(df, month, shopify=0.0):
+    s = build_summary(df, shopify)
+    t = s["totals"]
+    lines = ["\ufeff", f"{month} 财务报表 — 费用支出明细\n",
+             "序号,支出项目名称,金额,备注\n"]
+    total_exp = 0.0
+    for i,(label,keys) in enumerate(EXPENSE_ORDER,1):
+        amt = sum(abs(t.get(k,0)) for k in keys)
+        total_exp += amt
+        lines.append(f'{i},"{label}","${amt:,.2f}",\n')
+    lines.append(f',"支出合计","${total_exp:,.2f}",\n\n')
+    lines += [f"{month} 财务报表 — 销售收入明细\n",
+              "序号,收入项目名称,金额,备注\n",
+              f'1,"TikTok净销售额","${s["tk"]:,.2f}","退款冲销已扣除"\n',
+              f'2,"Shopify净销售额","${s["shopify"]:,.2f}",{"请手动填入" if shopify==0 else ""}\n',
+              f'3,"亚马逊退货净额","$0.00",\n',
+              f'4,"USPS退款净额","$0.00",\n',
+              f',"收入合计","${s["income"]:,.2f}",\n\n',
+              f'"净利润","${s["net"]:,.2f}"\n',
+              f'"净利润率","{s["margin"]}%"\n\n',
+              "完整流水分类明细\n",
+              "日期,来源,描述,金额,分类,状态\n"]
+    for _,r in df.iterrows():
+        desc = str(r["desc"]).replace('"','""')
+        lines.append(f'"{r["date"]}","{r["src"]}","{desc}","{r["amount"]:,.2f}","{r["cat"]}","{r["status"]}"\n')
+    return "".join(lines).encode("utf-8")
+
+
+def export_excel(df, month, shopify=0.0):
+    s  = build_summary(df, shopify)
+    t  = s["totals"]
+    MID,DARK,LITE,WHITE = "2E75B6","1F4E79","D6E4F0","FFFFFF"
+    def sd(c="BDD7EE"):
+        x=Side(style="thin",color=c); return Border(left=x,right=x,top=x,bottom=x)
+    def hdr(c,v,bg=MID):
+        c.value=v; c.font=Font(name="Arial",bold=True,color=WHITE,size=10)
+        c.fill=PatternFill("solid",fgColor=bg)
+        c.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
+        c.border=sd()
+    def dat(c,v,bg=WHITE,bold=False,align="left",color="000000",fmt=None):
+        c.value=v; c.font=Font(name="Arial",bold=bold,size=10,color=color)
+        c.fill=PatternFill("solid",fgColor=bg)
+        c.alignment=Alignment(horizontal=align,vertical="center")
+        c.border=sd()
+        if fmt: c.number_format=fmt
+
+    wb = Workbook()
+
+    # Sheet1: 支出
+    ws=wb.active; ws.title="支出明细"
+    for col,w in zip("ABCD",[6,24,14,16]): ws.column_dimensions[col].width=w
+    ws.merge_cells("A1:D1"); ws.row_dimensions[1].height=34
+    c=ws["A1"]; c.value=f"{month} 费用支出明细表"
+    c.font=Font(name="Arial",bold=True,size=14,color=WHITE)
+    c.fill=PatternFill("solid",fgColor=MID)
+    c.alignment=Alignment(horizontal="center",vertical="center"); c.border=sd()
+    ws.row_dimensions[2].height=22
+    for col,txt in enumerate(["序号","支出项目名称","金额","备注"],1): hdr(ws.cell(2,col),txt)
+    total_exp=0.0
+    for i,(label,keys) in enumerate(EXPENSE_ORDER):
+        r=i+3; ws.row_dimensions[r].height=20
+        bg=LITE if i%2==0 else WHITE
+        amt=sum(abs(t.get(k,0)) for k in keys); total_exp+=amt
+        dat(ws.cell(r,1),i+1,bg=bg,align="center")
+        dat(ws.cell(r,2),label,bg=bg)
+        c=ws.cell(r,3); c.value=amt; c.font=Font(name="Arial",size=10)
+        c.fill=PatternFill("solid",fgColor=bg)
+        c.alignment=Alignment(horizontal="center",vertical="center")
+        c.number_format='$#,##0.00'; c.border=sd()
+        dat(ws.cell(r,4),"",bg=bg)
+    rT=len(EXPENSE_ORDER)+3; ws.merge_cells(f"A{rT}:B{rT}"); ws.row_dimensions[rT].height=24
+    hdr(ws.cell(rT,1),"支出合计",bg=DARK)
+    ws.cell(rT,2).fill=PatternFill("solid",fgColor=DARK); ws.cell(rT,2).border=sd()
+    c=ws.cell(rT,3); c.value=total_exp
+    c.font=Font(name="Arial",bold=True,size=11,color=WHITE)
+    c.fill=PatternFill("solid",fgColor=DARK)
+    c.alignment=Alignment(horizontal="center",vertical="center")
+    c.number_format='$#,##0.00'; c.border=sd()
+    hdr(ws.cell(rT,4),"",bg=DARK)
+
+    # Sheet2: 收入
+    ws2=wb.create_sheet("收入明细")
+    for col,w in zip("ABCD",[6,24,14,20]): ws2.column_dimensions[col].width=w
+    ws2.merge_cells("A1:D1"); ws2.row_dimensions[1].height=34
+    c2=ws2["A1"]; c2.value=f"{month} 销售收入明细表"
+    c2.font=Font(name="Arial",bold=True,size=14,color=WHITE)
+    c2.fill=PatternFill("solid",fgColor=MID)
+    c2.alignment=Alignment(horizontal="center",vertical="center"); c2.border=sd()
+    ws2.row_dimensions[2].height=22
+    for col,txt in enumerate(["序号","收入项目名称","金额","备注"],1): hdr(ws2.cell(2,col),txt)
+    income_rows=[("TikTok净销售额",s["tk"],"退款冲销已扣除"),
+                 ("Shopify净销售额",s["shopify"],"需手动填入" if shopify==0 else ""),
+                 ("亚马逊退货净额",0.0,""),("USPS退款净额",0.0,""),("房租退款净额",0.0,"")]
+    for i,(label,amt,note) in enumerate(income_rows):
+        r=i+3; ws2.row_dimensions[r].height=20
+        bg=LITE if i%2==0 else WHITE
+        dat(ws2.cell(r,1),i+1,bg=bg,align="center")
+        dat(ws2.cell(r,2),label,bg=bg)
+        c=ws2.cell(r,3); c.value=amt if amt else None
+        c.font=Font(name="Arial",size=10)
+        c.fill=PatternFill("solid",fgColor="FFF2CC" if "手动" in note else bg)
+        c.alignment=Alignment(horizontal="center",vertical="center")
+        c.number_format='$#,##0.00'; c.border=sd()
+        dat(ws2.cell(r,4),note,bg=bg,color="856404" if "手动" in note else "000000")
+    rI=len(income_rows)+3; ws2.merge_cells(f"A{rI}:B{rI}"); ws2.row_dimensions[rI].height=24
+    hdr(ws2.cell(rI,1),"收入合计",bg=DARK)
+    ws2.cell(rI,2).fill=PatternFill("solid",fgColor=DARK); ws2.cell(rI,2).border=sd()
+    c=ws2.cell(rI,3); c.value=s["income"]
+    c.font=Font(name="Arial",bold=True,size=11,color=WHITE)
+    c.fill=PatternFill("solid",fgColor=DARK)
+    c.alignment=Alignment(horizontal="center",vertical="center")
+    c.number_format='$#,##0.00'; c.border=sd()
+    hdr(ws2.cell(rI,4),"",bg=DARK)
+
+    # Sheet3: 流水
+    ws3=wb.create_sheet("流水明细")
+    for col,w in zip("ABCDEF",[8,8,52,12,22,10]): ws3.column_dimensions[col].width=w
+    ws3.row_dimensions[1].height=22
+    for col,txt in enumerate(["日期","来源","描述","金额","分类","状态"],1): hdr(ws3.cell(1,col),txt)
+    for i,(_,row) in enumerate(df.iterrows()):
+        r=i+2; ws3.row_dimensions[r].height=18; bg=LITE if i%2==0 else WHITE
+        dat(ws3.cell(r,1),row["date"],bg=bg,align="center")
+        dat(ws3.cell(r,2),row["src"],bg=bg,align="center")
+        dat(ws3.cell(r,3),row["desc"],bg=bg)
+        c=ws3.cell(r,4); c.value=row["amount"]
+        c.font=Font(name="Arial",size=10,color="1A7A4A" if row["amount"]>0 else "000000")
+        c.fill=PatternFill("solid",fgColor=bg)
+        c.alignment=Alignment(horizontal="right",vertical="center")
+        c.number_format='$#,##0.00'; c.border=sd()
+        dat(ws3.cell(r,5),row["cat"],bg=bg)
+        sc={"auto":"1A7A4A","manual":"B85C00","pending":"C0392B"}
+        dat(ws3.cell(r,6),row["status"],bg=bg,color=sc.get(row["status"],"000000"),align="center")
+
+    buf=io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+
+# ══════════════════════════════════════════════════════════════
+#  STREAMLIT UI
+# ══════════════════════════════════════════════════════════════
+st.set_page_config(page_title="ColorFour 财务分类", page_icon="💅", layout="wide")
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500&family=DM+Serif+Display:ital@0;1&display=swap');
+html,body,[class*="css"]{font-family:'DM Sans',sans-serif}
+h1{font-family:'DM Serif Display',serif;font-weight:400;letter-spacing:-0.02em}
+.mbox{background:#f7f7f5;border-radius:12px;padding:16px 20px;border:1px solid rgba(0,0,0,.06)}
+.mlbl{font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:#888;margin-bottom:6px}
+.mval{font-family:'DM Serif Display',serif;font-size:26px;font-weight:400}
+.green{color:#1a7a4a}.red{color:#c0392b}
+</style>
+""", unsafe_allow_html=True)
+
+if "df" not in st.session_state: st.session_state.df = None
+if "month" not in st.session_state: st.session_state.month = "2026-02"
+if "shopify" not in st.session_state: st.session_state.shopify = 0.0
+
+st.markdown("### ColorFour LLC")
+st.markdown("# 财务流水*智能分类*")
+st.caption("上传银行 Statement (PDF) 与 Payoneer 流水 (CSV)，自动分类并生成月度 P&L")
+st.divider()
+
+c1, c2 = st.columns([1,2])
+with c1:
+    month = st.selectbox("账单月份", [f"2026-{i:02d}" for i in range(1,13)], index=1)
+    st.session_state.month = month
+with c2:
+    shopify = st.number_input("Shopify 净销售额（手动填入）",
+                               min_value=0.0, value=st.session_state.shopify,
+                               step=0.01, format="%.2f",
+                               help="Shopify 收款不在银行流水里，请手动输入")
+    st.session_state.shopify = shopify
+
+c3, c4 = st.columns(2)
+with c3:
+    bank_file = st.file_uploader("🏦 银行 Statement", type=["pdf","csv"],
+                                  help="自动识别 BofA / Chase")
+with c4:
+    pay_file  = st.file_uploader("💳 Payoneer 流水 CSV", type=["csv"])
+
+rb, db = st.columns([1,5])
+with rb: run = st.button("🚀 开始分类", type="primary", use_container_width=True)
+with db: demo = st.button("演示数据（BofA 1月）")
+
+if run:
+    if not bank_file and not pay_file:
+        st.warning("请至少上传一份文件")
     else:
-        st.caption("这里只需要改不确定的项目，不需要逐笔全部重选。")
-        edited_unknown_df = st.data_editor(
-            unknown_df[["row_id", "date", "description", "amount", "merchant_key", "final_category", "note"]].copy(),
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            column_config={
-                "date": st.column_config.DateColumn("日期"),
-                "amount": st.column_config.NumberColumn("金额", format="$%.2f"),
-                "final_category": st.column_config.SelectboxColumn("最终分类", options=CATEGORY_OPTIONS),
-                "note": st.column_config.TextColumn("备注"),
-            },
-            key="unknown_editor",
-        )
+        frames = []
+        with st.spinner("解析中..."):
+            if bank_file:
+                try:
+                    df_b, bname = parse_bank_pdf(bank_file.read())
+                    if not df_b.empty:
+                        frames.append(df_b)
+                        st.success(f"✅ {bname} 解析完成，共 {len(df_b)} 笔")
+                    else:
+                        st.warning("银行流水解析为空，请检查 PDF 格式")
+                except Exception as e:
+                    st.error(f"银行解析失败：{e}")
+            if pay_file:
+                try:
+                    df_p = parse_payoneer(pay_file.read())
+                    if not df_p.empty:
+                        frames.append(df_p)
+                        st.success(f"✅ Payoneer 解析完成，共 {len(df_p)} 笔")
+                    else:
+                        st.warning("Payoneer CSV 解析为空")
+                except Exception as e:
+                    st.error(f"Payoneer 解析失败：{e}")
+        if frames:
+            st.session_state.df = pd.concat(frames, ignore_index=True)
 
-    updated_df = mark_categories_from_editor(classified_df.copy(), edited_unknown_df)
-    st.session_state["edited_df"] = updated_df.copy()
+if demo:
+    demo_rows = [
+        {"date":"01/02","desc":"TikTok Inc PAYMENT TikTok Shop payout 346879","amount":5625.40,"src":"BofA"},
+        {"date":"01/06","desc":"TikTok Inc PAYMENT TikTok Shop payout 346889","amount":8866.50,"src":"BofA"},
+        {"date":"01/07","desc":"TikTok Inc PAYMENT TikTok Shop payout 346903","amount":9195.92,"src":"BofA"},
+        {"date":"01/08","desc":"TikTok Inc PAYMENT TikTok Shop payout 346913","amount":11800.33,"src":"BofA"},
+        {"date":"01/12","desc":"TikTok Inc PAYMENT TikTok Shop payout 346918","amount":10346.21,"src":"BofA"},
+        {"date":"01/13","desc":"TikTok Inc PAYMENT TikTok Shop payout 346934","amount":14338.99,"src":"BofA"},
+        {"date":"01/21","desc":"TikTok Inc PAYMENT TikTok Shop payout 346965","amount":13233.48,"src":"BofA"},
+        {"date":"01/02","desc":"PURCHASE 0101 TIKTOK ADS ADS.TIKTOK.COCA","amount":-5980.92,"src":"BofA"},
+        {"date":"01/20","desc":"PURCHASE 0120 TIKTOK ADS ADS.TIKTOK.COCA","amount":-9968.86,"src":"BofA"},
+        {"date":"01/02","desc":"Zelle payment to EVA SOLIS for Week52-53 payroll","amount":-1175.00,"src":"BofA"},
+        {"date":"01/05","desc":"Zelle payment to NUTVIPA BUTRASIRT for Week52-53 payroll","amount":-623.40,"src":"BofA"},
+        {"date":"01/13","desc":"ADP WAGE PAY ID:7670999705224TG","amount":-3982.81,"src":"BofA"},
+        {"date":"01/14","desc":"ADP Tax ID:LT4TG 011401A01","amount":-1440.64,"src":"BofA"},
+        {"date":"01/14","desc":"ADP PAY-BY-PAY ID:7670999705234TG","amount":-40.03,"src":"BofA"},
+        {"date":"01/20","desc":"CHECKCARD Regus Management Group iwgplc.com TX","amount":-4035.38,"src":"BofA"},
+        {"date":"01/05","desc":"TRANSFER COLORFOUR LLC:Mars Shipping Servic Confirmation# 4061732035","amount":-1470.15,"src":"BofA"},
+        {"date":"01/07","desc":"TRANSFER COLORFOUR LLC:ColorFour LLC Confirmation# 1881149832","amount":-15000.00,"src":"BofA"},
+        {"date":"01/09","desc":"Zelle payment to ZHENLI WANG","amount":-2781.00,"src":"BofA"},
+        {"date":"01/26","desc":"PURCHASE 0124 KLAVIYO INC. SOFTWARE","amount":-100.00,"src":"BofA"},
+        {"date":"01/02","desc":"CHECKCARD GOOGLE *Worksp Mountain View CA","amount":-39.51,"src":"BofA"},
+        {"date":"01/09","desc":"PURCHASE 0109 FANTUAN DELIVE Fremont CA","amount":-41.95,"src":"BofA"},
+        {"date":"01/06","desc":"External transfer fee - 3 Day","amount":-1.00,"src":"BofA"},
+        {"date":"01/07","desc":"Check #135","amount":-960.00,"src":"BofA"},
+        {"date":"02/10","desc":"Payment from COLORFOUR LLC - XX-445152","amount":20000.00,"src":"Payoneer"},
+        {"date":"02/10","desc":"Payment to 招商银行 (9005)","amount":-7986.53,"src":"Payoneer"},
+        {"date":"02/03","desc":"Payment to 中国银行 (9460)","amount":-2557.98,"src":"Payoneer"},
+        {"date":"02/02","desc":"Payment to 中国银行 (1510)","amount":-1089.05,"src":"Payoneer"},
+    ]
+    df_demo = pd.DataFrame(demo_rows)
+    df_demo["cat"]    = df_demo.apply(lambda r: cls_bank(r["desc"]) if r["src"]!="Payoneer" else cls_pay(r["desc"]), axis=1)
+    df_demo["status"] = df_demo["cat"].apply(lambda c: "auto" if c!="待确认" else "pending")
+    st.session_state.df = df_demo
+    st.session_state.month = "2026-01"
+    st.success(f"✅ 演示数据已加载，共 {len(df_demo)} 笔")
 
-    st.subheader("3）一键把你的修改写入规则库")
-    with st.expander("保存本次确认结果", expanded=False):
-        candidate_rows = updated_df.merge(
-            classified_df[["row_id", "final_category"]].rename(columns={"final_category": "old_category"}),
-            on="row_id",
-            how="left",
-        )
-        changed_rows = candidate_rows[candidate_rows["final_category"] != candidate_rows["old_category"]].copy()
+if st.session_state.df is not None:
+    df = st.session_state.df.copy()
+    s  = build_summary(df, st.session_state.shopify)
+    pend = (df["status"]=="pending").sum()
+    rate = round((df["status"]=="auto").sum()/len(df)*100)
 
-        if changed_rows.empty:
-            st.info("当前没有新的人工修改。")
+    st.divider()
+    m1,m2,m3,m4 = st.columns(4)
+    for col, label, val, sub, clr in [
+        (m1,"总收入",    f"${s['income']:,.2f}",  "TikTok + Shopify", "green"),
+        (m2,"总支出",    f"${abs(s['expense']):,.2f}", "不含内部转账", ""),
+        (m3,"净利润",    f"${s['net']:,.2f}",     f"利润率 {s['margin']}%", "green" if s['net']>0 else "red"),
+        (m4,"自动分类率",f"{rate}%",              f"{pend} 笔待确认", ""),
+    ]:
+        with col:
+            st.markdown(f'<div class="mbox"><div class="mlbl">{label}</div>'
+                        f'<div class="mval {clr}">{val}</div>'
+                        f'<div style="font-size:12px;color:#888;margin-top:4px">{sub}</div></div>',
+                        unsafe_allow_html=True)
+
+    st.markdown("")
+    t1, t2, t3 = st.tabs(["📋 流水明细", "📊 P&L 汇总", "📈 图表"])
+
+    with t1:
+        if pend > 0:
+            st.warning(f"⚠️ {pend} 笔交易待手动确认")
         else:
-            st.dataframe(
-                changed_rows[["row_id", "description", "merchant_key", "old_category", "final_category"]],
-                use_container_width=True,
-                hide_index=True,
-            )
+            st.success("✅ 所有交易已分类完成")
 
-            save_mode = st.radio(
-                "保存方式",
-                [
-                    "按 merchant_key 保存（推荐）",
-                    "按 description 前缀保存为 merchant 规则",
-                    "不保存，仅本次使用",
-                ],
-                horizontal=False,
-            )
+        fa,fb,fc = st.columns(3)
+        with fa: cf = st.selectbox("分类", ["全部"]+ALL_CATS)
+        with fb: sf = st.selectbox("来源", ["全部","BofA","Chase","Payoneer"])
+        with fc: tf = st.selectbox("状态", ["全部","auto","pending","manual"])
 
-            if st.button("保存修改到规则库"):
-                if save_mode == "按 merchant_key 保存（推荐）":
-                    for _, r in changed_rows.iterrows():
-                        save_override_rule(str(r["merchant_key"]), str(r["final_category"]))
-                elif save_mode == "按 description 前缀保存为 merchant 规则":
-                    for _, r in changed_rows.iterrows():
-                        save_new_pattern_rule(str(r["merchant_key"]), str(r["final_category"]), rule_bucket="merchant", confidence=0.95)
-                st.success("已保存。下次遇到类似商户会自动分类。")
+        filt = df.copy()
+        if cf!="全部": filt=filt[filt["cat"]==cf]
+        if sf!="全部": filt=filt[filt["src"]==sf]
+        if tf!="全部": filt=filt[filt["status"]==tf]
 
-    st.subheader("4）分类汇总")
-    summary_df = build_summary(updated_df)
+        edited = st.data_editor(
+            filt[["date","src","desc","amount","cat","status"]].rename(columns={
+                "date":"日期","src":"来源","desc":"描述","amount":"金额","cat":"分类","status":"状态"}),
+            column_config={
+                "分类": st.column_config.SelectboxColumn("分类", options=ALL_CATS, width="medium"),
+                "金额": st.column_config.NumberColumn("金额", format="$%.2f"),
+                "状态": st.column_config.TextColumn("状态", disabled=True),
+            },
+            use_container_width=True, hide_index=True, num_rows="fixed",
+        )
+        if edited is not None:
+            for i, orig_idx in enumerate(filt.index):
+                nc = edited.iloc[i]["分类"]
+                if nc != df.at[orig_idx,"cat"]:
+                    df.at[orig_idx,"cat"]    = nc
+                    df.at[orig_idx,"status"] = "manual"
+            st.session_state.df = df
 
-    st.dataframe(
-        summary_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "金额": st.column_config.NumberColumn("金额", format="$%.2f")
-        },
-    )
+    with t2:
+        pl1, pl2 = st.columns(2)
+        with pl1:
+            for label, rows_f, total, clr in [
+                ("收入", [(k,v) for k,v in s["totals"].items() if v>0 and k not in EXCLUDE_PL], s["income"], "#1a7a4a"),
+                ("支出", [(k,v) for k,v in s["totals"].items() if v<0 and k not in EXCLUDE_PL], s["expense"], None),
+            ]:
+                st.markdown(f"**{label}**")
+                for cat, amt in sorted(rows_f, key=lambda x:-abs(x[1])):
+                    color = "#1a7a4a" if amt>0 else "inherit"
+                    st.markdown(f"<div style='display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ed;font-size:13px'>"
+                                f"<span>{cat}</span><span style='color:{color}'>${abs(amt):,.2f}</span></div>",
+                                unsafe_allow_html=True)
+                st.markdown(f"<div style='display:flex;justify-content:space-between;padding:8px 0;font-weight:500'>"
+                            f"<span>{label}合计</span><span style='color:{clr if clr else \"inherit\"}'>${abs(total):,.2f}</span></div>",
+                            unsafe_allow_html=True)
+                st.markdown("")
+            nc = "#1a7a4a" if s["net"]>0 else "#c0392b"
+            st.markdown(f"<div style='display:flex;justify-content:space-between;padding:14px 0;"
+                        f"font-family:\"DM Serif Display\",serif;font-size:22px;border-top:2px solid #1a1a1a'>"
+                        f"<span>净利润</span><span style='color:{nc}'>${s['net']:,.2f}</span></div>",
+                        unsafe_allow_html=True)
+        with pl2:
+            exp_d = [(k,abs(v)) for k,v in s["totals"].items() if v<0 and k not in EXCLUDE_PL]
+            if exp_d:
+                exp_d.sort(key=lambda x:-x[1])
+                top8=exp_d[:8]; others=sum(x[1] for x in exp_d[8:])
+                if others>0: top8.append(("其他",others))
+                lbls,vals=zip(*top8)
+                fig=go.Figure(go.Pie(labels=lbls,values=vals,hole=0.45,textinfo="percent"))
+                fig.update_layout(margin=dict(l=0,r=0,t=0,b=0),height=320,
+                                  paper_bgcolor="rgba(0,0,0,0)",font_family="DM Sans")
+                st.plotly_chart(fig, use_container_width=True)
 
-    total_expense = summary_df["金额"].sum() if not summary_df.empty else 0.0
-    c1, c2, c3 = st.columns(3)
-    c1.metric("支出总笔数", int((updated_df["amount"] < 0).sum()))
-    c2.metric("待确认笔数", int(updated_df["needs_review"].sum()))
-    c3.metric("支出合计", amount_to_display(total_expense))
+    with t3:
+        daily = df.groupby("date")["amount"].sum().reset_index()
+        fig2 = px.bar(daily, x="date", y="amount",
+                      color=daily["amount"].apply(lambda x:"收入" if x>0 else "支出"),
+                      color_discrete_map={"收入":"#1a7a4a","支出":"#e74c3c"},
+                      title="每日收支")
+        fig2.update_layout(paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
+                           height=280,margin=dict(l=0,r=0,t=40,b=0))
+        st.plotly_chart(fig2, use_container_width=True)
 
-    st.subheader("5）导出")
-    excel_bytes = to_excel_bytes(
-        detail_df=updated_df.sort_values(["date", "row_id"]),
-        summary_df=summary_df,
-        unknown_df=updated_df[updated_df["needs_review"]].sort_values(["date", "row_id"]),
-    )
+        cat_t = df.groupby("cat")["amount"].sum().reset_index()
+        cat_t = cat_t[~cat_t["cat"].isin(EXCLUDE_PL)].sort_values("amount")
+        fig3 = px.bar(cat_t, x="amount", y="cat", orientation="h",
+                      color=cat_t["amount"].apply(lambda x:"收入" if x>0 else "支出"),
+                      color_discrete_map={"收入":"#1a7a4a","支出":"#2e75b6"},
+                      title="各类别汇总")
+        fig3.update_layout(paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
+                           showlegend=False,height=max(300,len(cat_t)*22),
+                           margin=dict(l=0,r=0,t=40,b=0))
+        st.plotly_chart(fig3, use_container_width=True)
 
-    st.download_button(
-        label="下载 Excel 结果",
-        data=excel_bytes,
-        file_name=f"bank_statement_classification_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    st.divider()
+    st.markdown("#### 导出")
+    e1,e2,e3 = st.columns(3)
+    with e1:
+        st.download_button("📄 财报 CSV", data=export_csv(df,month,shopify),
+                           file_name=f"ColorFour_{month}_财务报表.csv", mime="text/csv",
+                           use_container_width=True)
+    with e2:
+        st.download_button("📊 财报 Excel", data=export_excel(df,month,shopify),
+                           file_name=f"ColorFour_{month}_财务报表.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           use_container_width=True)
+    with e3:
+        st.download_button("📋 原始流水", data=df.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"ColorFour_{month}_原始流水.csv", mime="text/csv",
+                           use_container_width=True)
+```
 
-    csv_bytes = updated_df.sort_values(["date", "row_id"]).to_csv(index=False).encode("utf-8-sig")
-    st.download_button(
-        label="下载交易明细 CSV",
-        data=csv_bytes,
-        file_name=f"bank_statement_detail_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        mime="text/csv",
-    )
+---
 
-    st.subheader("6）建议你下一步怎么用")
-    st.markdown(
-        """
-- 第一次跑：把未知项改正确，顺手保存到规则库  
-- 第二次开始：大部分交易会自动命中  
-- 后面每个月：基本只需要确认少量新商户  
-- 如果你以后想更强，我建议再加：
-  - 供应商主数据表
-  - 员工名单表
-  - Zelle / Wire / Card 独立规则
-  - 自动生成“与你这张月度费用明细表一致”的格式
-        """
-    )
-
-
-if __name__ == "__main__":
-    main()
+**`requirements.txt`** — 也复制一份新建文件：
+```
+streamlit>=1.32.0
+pdfplumber>=0.10.3
+pandas>=2.0.0
+openpyxl>=3.1.2
+plotly>=5.18.0
