@@ -57,7 +57,7 @@ BANK_RULES = [
     (r"TRACK1099",                               "行政费用"),
     (r"AMAZON MKTPL|AMAZON RETA",                "办公用品采购"),
     (r"FANTUAN|HUNGRYPANDA|UBER.*EATS|SQ.*DOWNTOWN LA PHO|RUSSELL.*CONVENIENCE|SLICES.*LOS ANGELES", "午餐补助费"),
-    (r"Tst\* Salata|Sq \*Hinodeya|Uep\*Lao|Tst\* Togo|King Charcoal|Hanshin|LA Tofu|Lao MA Tou|Samyi Cake|Angel.*Tacos|Song Yu|Xiaoqing Huang|M&D Snacks|Full House|Tianlu Investment|Groupon|Classpass", "午餐补助费"),
+    (r"Tst\* Salata|Sq \*Hinodeya|Uep\*Lao|Tst\* Togo|King Charcoal|Hanshin|LA Tofu|Lao MA Tou|Samyi Cake|Angel.*Tacos|Song Yu|Xiaoqing Huang|M&D Snacks|Full House|Tianlu Investment|Groupon|Classpass|GOLDEN DRAGON", "午餐补助费"),
     (r"99 Ranch|H Mart|Gelson|Ralphs|168 Market|Super King|Home Depot|Daiso", "办公用品采购"),
     (r"TRANSFER.*ColorFour LLC Confirmation|TRANSFER COLORFOUR LLC:ColorFour", "Payoneer内部转账"),
     (r"External transfer fee|Monthly Service Fee", "银行手续费"),
@@ -189,8 +189,6 @@ def parse_bofa(data: bytes) -> pd.DataFrame:
 
         if section in ("dep", "wdl", "chk", "fee") and re.match(r'^\d{2}/\d{2}/\d{2}', line):
             j = i + 1
-            # Try first line alone — continuation lines can contain long number
-            # strings (e.g. TikTok payout IDs) that break the amount regex
             m_first = DATE_LINE.match(line) if section != "chk" else None
             if m_first:
                 full = line
@@ -319,6 +317,50 @@ def parse_payoneer(data: bytes) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def extract_bofa_summary(data: bytes) -> dict:
+    """Extract cover page totals from BofA PDF for reconciliation."""
+    try:
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            text = pdf.pages[0].extract_text() or ""
+    except Exception:
+        return {}
+    result = {}
+    patterns = {
+        "deposits":    r"Deposits and other credits\s+([\d,]+\.\d{2})",
+        "withdrawals": r"Withdrawals and other debits\s+-?([\d,]+\.\d{2})",
+        "checks":      r"Checks\s+-?([\d,]+\.\d{2})",
+        "fees":        r"Service fees\s+-?([\d,]+\.\d{2})",
+        "ending":      r"Ending balance[^\$]*\$([\d,]+\.\d{2})",
+    }
+    for key, pat in patterns.items():
+        m = re.search(pat, text)
+        if m:
+            result[key] = float(m.group(1).replace(",",""))
+    return result
+
+
+def extract_chase_summary(data: bytes) -> dict:
+    """Extract cover page totals from Chase PDF for reconciliation."""
+    try:
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            text = pdf.pages[0].extract_text() or ""
+    except Exception:
+        return {}
+    result = {}
+    patterns = {
+        "deposits":    r"Total Deposits and Additions\s+\$?([\d,]+\.\d{2})",
+        "withdrawals": r"(?:ATM & Debit Card Withdrawals|Total ATM)[^\d]*([\d,]+\.\d{2})",
+        "ending":      r"Ending Balance\s+\d+\s+\$?([\d,]+\.\d{2})",
+    }
+    for key, pat in patterns.items():
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            result[key] = float(m.group(1).replace(",",""))
+    return result
+
+
 def parse_bank_pdf(data: bytes):
     try:
         import pdfplumber
@@ -328,8 +370,12 @@ def parse_bank_pdf(data: bytes):
         first = ""
     bank = detect_bank(first)
     if bank == "Chase":
-        return parse_chase(data), "Chase"
-    return parse_bofa(data), "BofA"
+        df = parse_chase(data)
+        summary = extract_chase_summary(data)
+        return df, "Chase", summary
+    df = parse_bofa(data)
+    summary = extract_bofa_summary(data)
+    return df, "BofA", summary
 
 
 # ══════════════════════════════════════════════════════════════
@@ -500,6 +546,7 @@ h1{font-family:'DM Serif Display',serif;font-weight:400;letter-spacing:-0.02em}
 if "df" not in st.session_state: st.session_state.df = None
 if "month" not in st.session_state: st.session_state.month = "2026-02"
 if "shopify" not in st.session_state: st.session_state.shopify = 0.0
+if "bank_summary" not in st.session_state: st.session_state.bank_summary = {}
 
 st.markdown("### ColorFour LLC")
 st.markdown("# 财务流水*智能分类*")
@@ -536,9 +583,10 @@ if run:
         with st.spinner("解析中..."):
             if bank_file:
                 try:
-                    df_b, bname = parse_bank_pdf(bank_file.read())
+                    df_b, bname, bsummary = parse_bank_pdf(bank_file.read())
                     if not df_b.empty:
                         frames.append(df_b)
+                        st.session_state.bank_summary = bsummary
                         st.success(f"✅ {bname} 解析完成，共 {len(df_b)} 笔")
                     else:
                         st.warning("银行流水解析为空，请检查 PDF 格式")
@@ -594,6 +642,7 @@ if demo:
     st.session_state.month = "2026-01"
     st.success(f"✅ 演示数据已加载，共 {len(df_demo)} 笔")
 
+# ── Results ────────────────────────────────────────────────────
 if st.session_state.df is not None:
     df = st.session_state.df.copy()
     s  = build_summary(df, st.session_state.shopify)
@@ -601,6 +650,32 @@ if st.session_state.df is not None:
     rate = round((df["status"]=="auto").sum()/len(df)*100)
 
     st.divider()
+
+    # ── Reconciliation check against cover page ──────────────
+    bsummary = st.session_state.get("bank_summary", {})
+    if bsummary:
+        bofa_df = df[df["src"]=="BofA"]
+        parsed_dep = bofa_df[bofa_df["amount"]>0]["amount"].sum()
+        parsed_wdl = abs(bofa_df[bofa_df["amount"]<0]["amount"].sum())
+        cover_dep  = bsummary.get("deposits", None)
+        cover_wdl  = bsummary.get("withdrawals", None)
+        cover_chk  = bsummary.get("checks", 0)
+        cover_fee  = bsummary.get("fees", 0)
+
+        ok_dep = cover_dep is None or abs(parsed_dep - cover_dep) < 1.0
+        total_wdl_cover = (cover_wdl or 0) + cover_chk + cover_fee
+        ok_wdl = cover_wdl is None or abs(parsed_wdl - total_wdl_cover) < 1.0
+
+        if ok_dep and ok_wdl:
+            st.success(f"✅ 对账通过 — 存款 ${parsed_dep:,.2f} / 支出 ${parsed_wdl:,.2f} 与账单封面一致")
+        else:
+            msgs = []
+            if not ok_dep and cover_dep:
+                msgs.append(f"存款差异 ${abs(parsed_dep-cover_dep):,.2f}（解析 ${parsed_dep:,.2f} vs 封面 ${cover_dep:,.2f}）")
+            if not ok_wdl and cover_wdl:
+                msgs.append(f"支出差异 ${abs(parsed_wdl-total_wdl_cover):,.2f}（解析 ${parsed_wdl:,.2f} vs 封面 ${total_wdl_cover:,.2f}）")
+            st.error("⚠️ 对账不符，可能有漏扫交易！\n" + " | ".join(msgs))
+
     m1,m2,m3,m4 = st.columns(4)
     for col, label, val, sub, clr in [
         (m1,"总收入",    f"${s['income']:,.2f}",  "TikTok + Shopify", "green"),
@@ -619,7 +694,7 @@ if st.session_state.df is not None:
 
     with t1:
         if pend > 0:
-            st.warning(f"⚠️ {pend} 笔交易待手动确认")
+            st.warning(f"⚠️ {pend} 笔交易待手动确认 — 已在下表中用🔴红色高亮")
         else:
             st.success("✅ 所有交易已分类完成")
 
@@ -633,12 +708,29 @@ if st.session_state.df is not None:
         if sf!="全部": filt=filt[filt["src"]==sf]
         if tf!="全部": filt=filt[filt["status"]==tf]
 
+        # ── Highlighted view ─────────────────────────────────
+        display_df = filt[["date","src","desc","amount","cat","status"]].rename(columns={
+            "date":"日期","src":"来源","desc":"描述","amount":"金额","cat":"分类","status":"状态"})
+
+        def highlight_pending(row):
+            if row["状态"] == "pending":
+                return ["background-color:#fde8e8; color:#c0392b; font-weight:500"] * len(row)
+            return [""] * len(row)
+
+        styled = display_df.style.apply(highlight_pending, axis=1).format({"金额": "${:,.2f}"})
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+
+        # ── Editable correction ───────────────────────────────
+        st.markdown("**✏️ 修改分类（点击下拉选择）**")
         edited = st.data_editor(
             filt[["date","src","desc","amount","cat","status"]].rename(columns={
                 "date":"日期","src":"来源","desc":"描述","amount":"金额","cat":"分类","status":"状态"}),
             column_config={
                 "分类": st.column_config.SelectboxColumn("分类", options=ALL_CATS, width="medium"),
                 "金额": st.column_config.NumberColumn("金额", format="$%.2f"),
+                "日期": st.column_config.TextColumn("日期", disabled=True),
+                "来源": st.column_config.TextColumn("来源", disabled=True),
+                "描述": st.column_config.TextColumn("描述", disabled=True),
                 "状态": st.column_config.TextColumn("状态", disabled=True),
             },
             use_container_width=True, hide_index=True, num_rows="fixed",
