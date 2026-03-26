@@ -188,20 +188,25 @@ def parse_bofa(data: bytes) -> pd.DataFrame:
             i += 1; continue
 
         if section in ("dep", "wdl", "chk", "fee") and re.match(r'^\d{2}/\d{2}/\d{2}', line):
-            parts = [line]
             j = i + 1
-            while j < len(lines):
-                nxt = lines[j].strip()
-                if not nxt or re.match(r'^\d{2}/\d{2}/\d{2}', nxt) or skip(nxt): break
-                if nxt in ("Deposits and other credits",
-                           "Deposits and other credits - continued",
-                           "Withdrawals and other debits",
-                           "Withdrawals and other debits - continued",
-                           "Checks", "Service fees"): break
-                parts.append(nxt)
-                j += 1
-
-            full = " ".join(parts)
+            # Try first line alone — continuation lines can contain long number
+            # strings (e.g. TikTok payout IDs) that break the amount regex
+            m_first = DATE_LINE.match(line) if section != "chk" else None
+            if m_first:
+                full = line
+            else:
+                parts = [line]
+                while j < len(lines):
+                    nxt = lines[j].strip()
+                    if not nxt or re.match(r'^\d{2}/\d{2}/\d{2}', nxt) or skip(nxt): break
+                    if nxt in ("Deposits and other credits",
+                               "Deposits and other credits - continued",
+                               "Withdrawals and other debits",
+                               "Withdrawals and other debits - continued",
+                               "Checks", "Service fees"): break
+                    parts.append(nxt)
+                    j += 1
+                full = " ".join(parts)
 
             if section == "chk":
                 m = CHECK_LINE.match(full)
