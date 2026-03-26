@@ -60,7 +60,9 @@ BANK_RULES = [
     (r"External transfer fee|Monthly Service Fee", "银行手续费"),
     (r"Check #1[0-9]+",                          "停车补助费"),
     (r"PAYPAL.*INST XFER",                       "其他支出"),
-    (r"Tst\* Salata|Sq \*Hinodeya|Uep\*Lao|Full House|99 Ranch|Home Depot|Slices|Tst\* Togo|King Charcoal|Super King|Gelson|H Mart|Daiso|168 Market|Hanshin|Ralphs|LA Tofu|Groupon|Classpass|Lao MA Tou|Samyi Cake|Tianlu Investment|Angel.*Tacos|Song Yu|Xiaoqing Huang|M&D Snacks", "股东个人消费"),
+    (r"Tst\* Salata|Sq \*Hinodeya|Uep\*Lao|Tst\* Togo|King Charcoal|Hanshin|LA Tofu|Lao MA Tou|Slices|Samyi Cake|Angel.*Tacos|Song Yu|Xiaoqing Huang|M&D Snacks|Full House|Tianlu Investment|Groupon|Classpass", "午餐补助费"),
+    (r"99 Ranch|H Mart|Gelson|Ralphs|168 Market|Super King|Home Depot|Daiso", "办公用品采购"),
+    (r"imyfone|www\.imyfone", "办公软件会费"),
 ]
 
 ALL_CATS = [
