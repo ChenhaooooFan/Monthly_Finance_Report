@@ -226,7 +226,7 @@ def parse_bofa(data: bytes) -> pd.DataFrame:
 
     if not rows:
         return pd.DataFrame()
-    df = pd.DataFrame(rows).drop_duplicates(subset=["date", "desc", "amount"])
+    df = pd.DataFrame(rows)
     df["cat"]    = df["desc"].apply(cls_bank)
     df["status"] = df["cat"].apply(lambda c: "auto" if c != "待确认" else "pending")
     return df
@@ -279,7 +279,7 @@ def parse_chase(data: bytes) -> pd.DataFrame:
 
     if not rows:
         return pd.DataFrame()
-    df = pd.DataFrame(rows).drop_duplicates(subset=["date", "desc", "amount"])
+    df = pd.DataFrame(rows)
     df["cat"]    = df["desc"].apply(cls_bank)
     df["status"] = df["cat"].apply(lambda c: "auto" if c != "待确认" else "pending")
     return df
