@@ -528,7 +528,6 @@ if run:
             st.session_state.df = pd.concat(frames, ignore_index=True)
 
 if demo:
-    # inline demo rows from Jan BofA
     demo_rows = [
         {"date":"01/02","desc":"TikTok Inc PAYMENT TikTok Shop payout 346879","amount":5625.40,"src":"BofA"},
         {"date":"01/06","desc":"TikTok Inc PAYMENT TikTok Shop payout 346889","amount":8866.50,"src":"BofA"},
@@ -565,7 +564,6 @@ if demo:
     st.session_state.month = "2026-01"
     st.success(f"✅ 演示数据已加载，共 {len(df_demo)} 笔")
 
-# ── Results ────────────────────────────────────────────────────
 if st.session_state.df is not None:
     df = st.session_state.df.copy()
     s  = build_summary(df, st.session_state.shopify)
@@ -636,9 +634,9 @@ if st.session_state.df is not None:
                     st.markdown(f"<div style='display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ed;font-size:13px'>"
                                 f"<span>{cat}</span><span style='color:{color}'>${abs(amt):,.2f}</span></div>",
                                 unsafe_allow_html=True)
-                clr2 = "#1a7a4a" if amt>0 else "inherit"
+                col_color = clr if clr else "#1a1a1a"
                 st.markdown(f"<div style='display:flex;justify-content:space-between;padding:8px 0;font-weight:500'>"
-                            f"<span>{label}合计</span><span style='color:{clr if clr else \"inherit\"}'>${abs(total):,.2f}</span></div>",
+                            f"<span>{label}合计</span><span style='color:{col_color}'>${abs(total):,.2f}</span></div>",
                             unsafe_allow_html=True)
                 st.markdown("")
             nc = "#1a7a4a" if s["net"]>0 else "#c0392b"
