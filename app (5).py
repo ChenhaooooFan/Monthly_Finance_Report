@@ -197,6 +197,7 @@ def parse_bofa(data: bytes) -> pd.DataFrame:
                 while j < len(lines):
                     nxt = lines[j].strip()
                     if not nxt or re.match(r'^\d{2}/\d{2}/\d{2}', nxt) or skip(nxt): break
+                    if nxt.startswith("Total"): break    
                     if nxt in ("Deposits and other credits",
                                "Deposits and other credits - continued",
                                "Withdrawals and other debits",
