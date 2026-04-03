@@ -721,11 +721,17 @@ if st.session_state.df is not None:
         styled = display_df.style.apply(highlight_pending, axis=1).format({"金额": "${:,.2f}"})
         st.dataframe(styled, use_container_width=True, hide_index=True)
 
-        # ── Editable correction ───────────────────────────────
-        st.markdown("**✏️ 修改分类（点击下拉选择）**")
+        # ── Editable correction (FIX: use key + save button) ─
+        st.markdown("**✏️ 修改分类（改完后点击「保存修改」）**")
+
+        edit_df = filt[["date","src","desc","amount","cat","status"]].copy()
+        edit_df = edit_df.rename(columns={
+            "date":"日期","src":"来源","desc":"描述","amount":"金额","cat":"分类","status":"状态"})
+        # Store the original index mapping so we can write back
+        edit_df["_orig_idx"] = filt.index.tolist()
+
         edited = st.data_editor(
-            filt[["date","src","desc","amount","cat","status"]].rename(columns={
-                "date":"日期","src":"来源","desc":"描述","amount":"金额","cat":"分类","status":"状态"}),
+            edit_df.drop(columns=["_orig_idx"]),
             column_config={
                 "分类": st.column_config.SelectboxColumn("分类", options=ALL_CATS, width="medium"),
                 "金额": st.column_config.NumberColumn("金额", format="$%.2f"),
@@ -735,14 +741,22 @@ if st.session_state.df is not None:
                 "状态": st.column_config.TextColumn("状态", disabled=True),
             },
             use_container_width=True, hide_index=True, num_rows="fixed",
+            key="cat_editor",
         )
-        if edited is not None:
-            for i, orig_idx in enumerate(filt.index):
+
+        if st.button("💾 保存修改", type="primary"):
+            changed = 0
+            for i, orig_idx in enumerate(edit_df["_orig_idx"]):
                 nc = edited.iloc[i]["分类"]
-                if nc != df.at[orig_idx,"cat"]:
-                    df.at[orig_idx,"cat"]    = nc
-                    df.at[orig_idx,"status"] = "manual"
-            st.session_state.df = df
+                if nc != st.session_state.df.at[orig_idx, "cat"]:
+                    st.session_state.df.at[orig_idx, "cat"]    = nc
+                    st.session_state.df.at[orig_idx, "status"] = "manual"
+                    changed += 1
+            if changed:
+                st.success(f"✅ 已保存 {changed} 条分类修改")
+                st.rerun()
+            else:
+                st.info("没有检测到修改")
 
     with t2:
         pl1, pl2 = st.columns(2)
